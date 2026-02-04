@@ -20,6 +20,8 @@ async def lifespan(app: FastAPI):
     # Startup
     yield
     # Shutdown
+    from app.providers import close_all_providers
+    await close_all_providers()
     await rate_limiter.close()
 
 
