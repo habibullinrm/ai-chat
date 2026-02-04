@@ -42,7 +42,7 @@ ai-chat/
 
 ```bash
 # Запуск всего проекта
-docker-compose up -d
+docker compose up -d
 
 # Backend отдельно
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -121,3 +121,4 @@ Frontend (Next.js) → Backend (FastAPI) → LLM Providers
 - Frontend: camelCase, TypeScript strict mode
 - API версионирование: `/api/v1/`
 - Коммиты: conventional commits (feat, fix, docs, refactor)
+- Документация и комментарии: русский язык
