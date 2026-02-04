@@ -4,6 +4,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.middleware.base import MiddlewareAction
+from app.middleware.pipeline import MiddlewarePipeline
 from app.models.message import Message, MessageRole
 from app.providers import get_provider
 from app.providers.base import ChatCompletionResult
@@ -14,6 +16,14 @@ from app.schemas.chat import (
 )
 from app.schemas.conversation import ConversationCreate
 from app.services.conversation import ConversationService
+
+
+class MiddlewareBlockedError(Exception):
+    """Исключение при блокировке middleware."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
 
 
 class ChatService:
@@ -27,6 +37,7 @@ class ChatService:
         """
         self.db = db
         self.conversation_service = ConversationService(db)
+        self.pipeline = MiddlewarePipeline(db)
 
     async def send_message(
         self,
@@ -44,6 +55,7 @@ class ChatService:
 
         Raises:
             ValueError: Если диалог не найден или не принадлежит пользователю
+            MiddlewareBlockedError: Если сообщение заблокировано middleware
         """
         # 1. Получаем или создаём диалог
         if request.conversation_id:
@@ -64,20 +76,41 @@ class ChatService:
                 ),
             )
 
-        # 2. Загружаем историю сообщений
-        history = await self.conversation_service.get_messages(
-            conversation.id,
-            limit=50,  # Ограничиваем контекст
+        # 2. Создаём контекст middleware
+        context = self.pipeline.create_context(
+            user_id=user_id,
+            message=request.message,
+            provider=request.provider,
+            model=request.model,
+            conversation_id=conversation.id,
+            parameters=request.parameters.model_dump(),
+            system_prompt=request.system_prompt,
         )
 
-        # 3. Формируем список сообщений для LLM
+        # 3. Выполняем pre-process middleware
+        pre_result = await self.pipeline.run_pre_process(context)
+
+        if pre_result.action == MiddlewareAction.BLOCK:
+            raise MiddlewareBlockedError(pre_result.error or "Запрос заблокирован")
+
+        # Обновляем контекст после middleware
+        if pre_result.context:
+            context = pre_result.context
+
+        # 4. Загружаем историю сообщений
+        history = await self.conversation_service.get_messages(
+            conversation.id,
+            limit=50,
+        )
+
+        # 5. Формируем список сообщений для LLM
         messages: list[ChatMessageInput] = []
 
-        # Добавляем системный промпт если есть
-        if request.system_prompt:
+        # Добавляем системный промпт (может быть изменён middleware)
+        if context.system_prompt:
             messages.append(ChatMessageInput(
                 role=MessageRole.SYSTEM,
-                content=request.system_prompt,
+                content=context.system_prompt,
             ))
 
         # Добавляем историю
@@ -87,45 +120,54 @@ class ChatService:
                 content=msg.content,
             ))
 
-        # Добавляем текущее сообщение
+        # Добавляем текущее сообщение (может быть изменено middleware)
         messages.append(ChatMessageInput(
             role=MessageRole.USER,
-            content=request.message,
+            content=context.message,
         ))
 
-        # 4. Сохраняем сообщение пользователя
+        # 6. Сохраняем сообщение пользователя
         user_message = Message(
             conversation_id=conversation.id,
             role=MessageRole.USER,
-            content=request.message,
+            content=context.message,
         )
         self.db.add(user_message)
 
-        # 5. Получаем ответ от провайдера
-        provider = get_provider(request.provider)
+        # 7. Получаем ответ от провайдера
+        provider = get_provider(context.provider)
         result: ChatCompletionResult = await provider.chat_completion(
             messages=messages,
-            model=request.model,
+            model=context.model,
             parameters=request.parameters,
         )
 
-        # 6. Сохраняем ответ ассистента
+        # 8. Выполняем post-process middleware
+        post_result = await self.pipeline.run_post_process(context, result.content)
+
+        if post_result.action == MiddlewareAction.BLOCK:
+            raise MiddlewareBlockedError(post_result.error or "Ответ заблокирован")
+
+        # Используем обработанный ответ
+        final_content = post_result.response or result.content
+
+        # 9. Сохраняем ответ ассистента
         assistant_message = Message(
             conversation_id=conversation.id,
             role=MessageRole.ASSISTANT,
-            content=result.content,
+            content=final_content,
             tokens_used=result.usage.total_tokens,
         )
         self.db.add(assistant_message)
 
-        # 7. Коммитим изменения
+        # 10. Коммитим изменения
         await self.db.commit()
         await self.db.refresh(assistant_message)
 
         return ChatCompletionResponse(
             conversation_id=conversation.id,
             message_id=assistant_message.id,
-            content=result.content,
+            content=final_content,
             role=MessageRole.ASSISTANT,
             usage=result.usage,
             finish_reason=result.finish_reason,

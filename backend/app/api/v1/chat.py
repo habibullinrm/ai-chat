@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_db
 from app.models.user import User
 from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
-from app.services.chat import ChatService
+from app.services.chat import ChatService, MiddlewareBlockedError
 
 router = APIRouter()
 
@@ -34,12 +34,17 @@ async def create_chat_completion(
         Ответ от LLM с метаданными
 
     Raises:
-        HTTPException: При ошибке провайдера или диалога
+        HTTPException: При ошибке провайдера, диалога или блокировке middleware
     """
     service = ChatService(db)
 
     try:
         return await service.send_message(current_user.id, request)
+    except MiddlewareBlockedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e.message),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
