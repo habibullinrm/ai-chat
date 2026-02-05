@@ -214,3 +214,30 @@ class ConversationService:
 
         result = await self.db.execute(query)
         return list(result.scalars().all())
+
+    async def clear_messages(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+    ) -> bool:
+        """Удаление всех сообщений диалога.
+
+        Args:
+            conversation_id: ID диалога
+            user_id: ID пользователя (для проверки прав)
+
+        Returns:
+            True если сообщения удалены, False если диалог не найден
+        """
+        # Проверяем права на диалог
+        conversation = await self.get_user_conversation(conversation_id, user_id)
+        if conversation is None:
+            return False
+
+        # Удаляем все сообщения
+        messages = await self.get_messages(conversation_id)
+        for message in messages:
+            await self.db.delete(message)
+
+        await self.db.commit()
+        return True

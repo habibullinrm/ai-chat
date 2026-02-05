@@ -245,3 +245,33 @@ async def get_conversation_messages(
 
     messages = await service.get_messages(conversation_id, limit)
     return [MessageResponse.model_validate(m) for m in messages]
+
+
+@router.delete(
+    "/{conversation_id}/messages",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Очистка сообщений диалога",
+)
+async def clear_conversation_messages(
+    conversation_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Удаление всех сообщений диалога.
+
+    Args:
+        conversation_id: ID диалога
+        current_user: Текущий пользователь
+        db: Сессия БД
+
+    Raises:
+        HTTPException: Если диалог не найден
+    """
+    service = ConversationService(db)
+    cleared = await service.clear_messages(conversation_id, current_user.id)
+
+    if not cleared:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Диалог не найден",
+        )
